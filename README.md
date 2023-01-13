@@ -1,1 +1,1 @@
-# Data science projects can be found off of the branches
+# OMSA's Computational Track Company Project Practicum
