@@ -1,0 +1,178 @@
+---
+title: "Heart Disease - Combine Results & Final Analysis"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+date: "`r format(Sys.time(), '%c %Z')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+load("C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/MergeResults/data_export_hda.RData")
+
+python_models = read.csv("C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/MergeResults/heart_disease_conditions_model_predictions_2.2M.csv", header=TRUE, fileEncoding="UTF-8-BOM")
+
+regions = read.csv("C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/Regions.csv", header=TRUE, fileEncoding="UTF-8-BOM")
+
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(glmnet)
+library(caret)
+library(ROCR)
+library(car)
+```
+
+# Background
+
+This document Merges results from two analyses: Logistic Regression in R, and KNN, SVM, Random Forests, Logistic Regression, Gaussian Naive Bayes, and Decision Trees from SciKit Learn (python)
+
+## Setup
+
+The code below combines results and calculate the state percents for the Tableau visualization.
+
+```{r}
+all_models <- inner_join(data_export_hda, python_models, by = c("person_id"))
+
+all_models <- all_models %>% mutate(undiagnosed_LR = ifelse(LR==1 & dep_target_hd==0, 1, 0)) %>%
+               mutate(undiagnosed_KNN = ifelse(KNN==1 & dep_target_hd==0, 1, 0)) %>%
+               mutate(undiagnosed_SVM = ifelse(SVM==1 & dep_target_hd==0, 1, 0)) %>%
+               mutate(undiagnosed_GNB = ifelse(GNB==1 & dep_target_hd==0, 1, 0)) %>%
+               mutate(undiagnosed_DTC = ifelse(DTC==1 & dep_target_hd==0, 1, 0)) %>%
+               mutate(undiagnosed_RF = ifelse(RF==1 & dep_target_hd==0, 1, 0))
+
+state_pcts_total_all <- all_models %>% group_by(state) %>% 
+  summarise(totalState = n_distinct(person_id), 
+            StateUndiag40 = sum(undiagnosed_40),
+            StateUndiag50 = sum(undiagnosed_50),
+            StateUndiag60 = sum(undiagnosed_60),
+            StateUndiagLR = sum(undiagnosed_LR),
+            StateUndiagKNN = sum(undiagnosed_KNN),
+            StateUndiagSVM = sum(undiagnosed_SVM),
+            StateUndiagGNB = sum(undiagnosed_GNB),
+            StateUndiagDTC = sum(undiagnosed_DTC),
+            StateUndiagRF = sum(undiagnosed_RF),
+            .groups = 'drop') %>%
+  mutate(StatePopPerc40 = StateUndiag40*100/totalState)  %>%
+  mutate(StatePopPerc50 = StateUndiag50*100/totalState)  %>%
+  mutate(StatePopPerc60 = StateUndiag60*100/totalState)  %>%
+  mutate(StatePopPercLR = StateUndiagLR*100/totalState)  %>%
+  mutate(StatePopPercKNN = StateUndiagKNN*100/totalState)  %>%
+  mutate(StatePopPercSVM = StateUndiagSVM*100/totalState)  %>%
+  mutate(StatePopPercGNB = StateUndiagGNB*100/totalState)  %>%
+  mutate(StatePopPercDTC = StateUndiagDTC*100/totalState)  %>%
+  mutate(StatePopPercRF = StateUndiagRF*100/totalState)  
+
+regions <- regions %>% rename(StateName = State)
+state_pcts_total_all <- left_join(state_pcts_total_all, regions, by = c("state"="StateCode"))
+```
+
+
+## Evaluate Models
+
+Next, we do a final evaluation of all models. We look at the Confusion Matrices for different models and thresholds. We also look at the cost of under/over diagnoses. The following informs our model selection.
+
+ - Accuracy: Proportion of response values predicted correctly
+ - Sensitivity (True Positive Rate): Proportion of responses with heart disease predicted correctly
+ - Specificity (True Negative Rate): Proportion of responses without heart disease predicted correctly
+ - Cost (Equal): Assume that the cost of underdiagnosing and overdiagnosing heart disease are the same
+ - Cost (Unequal): Assume that the cost of underdiagnosing heart disease is more significant than the cost of overdiagnosing
+
+ 
+Regarding cost: underdiagnosing heart disease has cost in terms of human loss, lower quality of life, and economic impacts that are difficult to quantify, but are more costly than overdiagnosing heart disease, which incurs temporary additional expense for the patient. It's hard to estimate the exact cost, but here we are suggesting underdiagnosing (false negative) is **2x** more costly.
+
+If all models have similar prediction metrics, we'll give preference to the model with the lower cost and higher sensitivity (correctly identifying positives is more important)
+
+
+### Confusion Matrix Summary
+
+For Logistic Regression in R, we still select the **LASSO model at 40% threshold**. LASSO metrics are shown below, taken from the full R Logistic Regression Analysis.
+
+ - Threshold: The 40% threshold makes sense given our view of risks and payoffs. Under the 2x Cost evaluation, these models have a lower cost.
+ - Model: LASSO (40%) is selected because it has the highest accuracy and highest sensitivity (true positive rate)
+ 
+|          | Accuracy    | Sensitivity   | Specificity  | Equal Cost  | 2x Cost  |
+|----------|-------------|---------------|--------------|-------------|----------|
+|lasso 50  |0.7368       |0.7332         |0.7437        |586,174      |978,177   | 
+|lasso 40  |0.7396       |0.8109         |0.6684        |579,889      |790,158   | 
+|lasso 60  |0.7310       |0.7198         |0.7556        |599,027      |1,027,670 | 
+ 
+
+Six models were also evaluated using scikit learn (python): Logistic Regression, K Nearest Neighbors, Support Vector Machines, Gaussian Naive Bayes, Decision Trees, and Random Forests. Also models give equal weight to positive and negative outcomes.
+
+From this analysis, the **Random Forest** model has the highest Accuracy and Sensitivity, and also the lowest cost.
+
+|          | Accuracy | Sensitivity | Specificity	 | Equal Cost	  | 2x Cost     |
+|----------|----------|-------------|--------------|--------------|-------------|
+|LR	       | 0.7368 	| 0.7335 	    | 0.7432 	     | 586,134 	    | 977,366     |
+|KNN	     | 0.6770 	| 0.6642 	    | 0.7167 	     | 719,202 	    | 1,284,063   |
+|SVM	     | 0.7275 	| 0.7756 	    | 0.6707 	     | 606,807 	    | 877,320     |
+|GNB	     | 0.7365 	| 0.7544 	    | 0.7090 	     | 586,863 	    | 917,253     |
+|DTC	     | 0.7380 	| 0.7743 	    | 0.6912 	     | 583,440 	    | 866,638     |
+|RF	       | 0.7386 	| 0.7769 	    | 0.6900 	     | 582,138 	    | 859,908     |
+
+
+**Confusion Matrix Code**
+
+Code below shows the calculations of confusion matrices
+
+```{r}
+# LASSO Models from R
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_lasso_50, data = all_models))
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_lasso_40, data = all_models))
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_lasso_60, data = all_models))
+
+# scikit learn models
+confusionMatrix(xtabs(~dep_target_hd + LR, data = all_models))
+confusionMatrix(xtabs(~dep_target_hd + KNN, data = all_models))
+confusionMatrix(xtabs(~dep_target_hd + SVM, data = all_models))
+confusionMatrix(xtabs(~dep_target_hd + GNB, data = all_models))
+confusionMatrix(xtabs(~dep_target_hd + DTC, data = all_models))
+confusionMatrix(xtabs(~dep_target_hd + RF, data = all_models))
+```
+
+**Cost Code**
+
+Code below shows the cost calculations
+
+```{r}
+# LASSO models from R
+xtabs(~dep_target_hd + pred_outcome_lasso_50, data = all_models)[1,2] + xtabs(~dep_target_hd + pred_outcome_lasso_50, data = all_models)[2,1]
+xtabs(~dep_target_hd + pred_outcome_lasso_50, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_lasso_50, data = all_models)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_lasso_40, data = all_models)[1,2] + xtabs(~dep_target_hd + pred_outcome_lasso_40, data = all_models)[2,1]
+xtabs(~dep_target_hd + pred_outcome_lasso_40, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_lasso_40, data = all_models)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_lasso_60, data = all_models)[1,2] + xtabs(~dep_target_hd + pred_outcome_lasso_60, data = all_models)[2,1]
+xtabs(~dep_target_hd + pred_outcome_lasso_60, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_lasso_60, data = all_models)
+
+
+# scikit learn
+xtabs(~dep_target_hd + LR, data = all_models)[1,2] + xtabs(~dep_target_hd + LR, data = all_models)[2,1]
+xtabs(~dep_target_hd + LR, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + LR, data = all_models)[2,1]
+
+xtabs(~dep_target_hd + KNN, data = all_models)[1,2] + xtabs(~dep_target_hd + KNN, data = all_models)[2,1]
+xtabs(~dep_target_hd + KNN, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + KNN, data = all_models)[2,1]
+
+xtabs(~dep_target_hd + SVM, data = all_models)[1,2] + xtabs(~dep_target_hd + SVM, data = all_models)[2,1]
+xtabs(~dep_target_hd + SVM, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + SVM, data = all_models)[2,1]
+
+xtabs(~dep_target_hd + GNB, data = all_models)[1,2] + xtabs(~dep_target_hd + GNB, data = all_models)[2,1]
+xtabs(~dep_target_hd + GNB, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + GNB, data = all_models)[2,1]
+
+xtabs(~dep_target_hd + DTC, data = all_models)[1,2] + xtabs(~dep_target_hd + DTC, data = all_models)[2,1]
+xtabs(~dep_target_hd + DTC, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + DTC, data = all_models)[2,1]
+
+xtabs(~dep_target_hd + RF, data = all_models)[1,2] + xtabs(~dep_target_hd + RF, data = all_models)[2,1]
+xtabs(~dep_target_hd + RF, data = all_models)[1,2] + 2*xtabs(~dep_target_hd + RF, data = all_models)[2,1]
+
+```
+
+
+Export data to CSV
+```{r}
+write.csv(all_models, "C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/MergeResults/hda.csv")
+write.csv(state_pcts_total_all, "C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/MergeResults/hdas.csv")
+```

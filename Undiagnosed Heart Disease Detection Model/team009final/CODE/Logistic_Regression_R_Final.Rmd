@@ -1,0 +1,516 @@
+---
+title: "Heart Disease - Logistic Regression"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+date: "`r format(Sys.time(), '%c %Z')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pred_data = read.csv("C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/train100k_test2m/heart_disease_conditions_22M_20220407.csv", header=TRUE, fileEncoding="UTF-8-BOM")
+
+data = read.csv("C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/train100k_test2m/heart_disease_conditions_100K_20220407.csv", header=TRUE, fileEncoding="UTF-8-BOM")
+
+regions = read.csv("C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/Regions.csv", header=TRUE, fileEncoding="UTF-8-BOM")
+
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(glmnet)
+library(caret)
+library(ROCR)
+library(car)
+```
+
+# Background
+
+This document explores a logistic regression model to predict heart disease based on various features. 
+
+## Data Description
+
+The data asset we chose for our project is the Medicare Claims SynPUF data for 2008-2010 in the OMOP Common Data Model from OHDSI with 2.3 million patients aged 65 and older
+
+1. **i_diabetes**: 1 if has diabetes, 0 if does not have diabetes
+2. **i_chronic**: 1 if has a chronic heart condition, 0 if does not have a chronic heart condition 
+3. **i_high_bp**: 1 if has high blood pressure, 0 if does not have high blood pressure 
+4. **i_obesity**: 1 if patient is obese, 0 if patient is not obese
+6. **i_statin**: 1 if patient is taking medication in the statin family, 0 if patient is not taking these medications 
+7. **i_aspirin**: 1 if patient is taking medication in the aspirin family, 0 if patient is not taking these medications 
+8. **age**: Age of the patient
+9. **gender**: Male, Female 
+10. **race**:  White, Blank, or Unknown
+11. **ethnicity**:  Hispanic or Latino, or Not Hispanic or Latino
+12. **dep_target_hd**: 1 if the patient has diagnosed heart disease, 0 if no diagnosis
+
+## Setup
+
+The code below imports and cleans the data: training and testing data
+
+```{r}
+# Create field for DOB and calculate age in 2010
+data <- data %>% mutate(DOB = as.Date(with(data,paste(year_of_birth, month_of_birth, day_of_birth,sep="-")),"%Y-%m-%d"))
+data <- data %>% mutate(age = as.integer(difftime("2010-6-30", DOB, units = "days")/365.25,0))
+
+# Select all columns that could be used for the model
+data <- data %>% select(dep_target_hd, i_diabetes, i_chronic, i_high_bp, i_obesity, i_statin, i_aspirin, age, gender_source_value, race_source_value, ethnicity_source_value, state, person_id) %>% 
+              rename(gender = gender_source_value, race = race_source_value, ethnicity = ethnicity_source_value)
+
+# Set categorical variables to factors
+data <- data %>% mutate(i_diabetes = as.factor(i_diabetes))
+data <- data %>% mutate(i_chronic = as.factor(i_chronic))
+data <- data %>% mutate(i_high_bp = as.factor(i_high_bp))
+data <- data %>% mutate(i_obesity = as.factor(i_obesity))
+data <- data %>% mutate(i_statin = as.factor(i_statin))
+data <- data %>% mutate(i_aspirin = as.factor(i_aspirin))
+
+data <- data %>% mutate(gender = factor(gender,labels = c("male","female")))
+data <- data %>% mutate(race = factor(race,labels = c("white","black","unknown","unknown")))
+data <- data %>% mutate(ethnicity = factor(ethnicity,
+                labels = c("not hispanic or latino","not hispanic or latino","not hispanic or latino","hispanic or latino")))
+
+# Print head of data
+head(data)
+```
+
+
+The code below imports and cleans the data: data for prediction
+
+```{r}
+# Create field for DOB and calculate age in 2010
+pred_data <- pred_data %>% mutate(DOB = as.Date(with(pred_data,paste(year_of_birth, month_of_birth, day_of_birth,sep="-")),"%Y-%m-%d"))
+pred_data <- pred_data %>% mutate(age = as.integer(difftime("2010-6-30", DOB, units = "days")/365.25,0))
+
+# Select all columns that could be used for the model
+pred_data <- pred_data %>% select(dep_target_hd, i_diabetes, i_chronic, i_high_bp, i_obesity, i_statin, i_aspirin, age, gender_source_value, race_source_value, ethnicity_source_value, state, person_id) %>% 
+              rename(gender = gender_source_value, race = race_source_value, ethnicity = ethnicity_source_value)
+
+# Set categorical variables to factors
+pred_data <- pred_data %>% mutate(i_diabetes = as.factor(i_diabetes))
+pred_data <- pred_data %>% mutate(i_chronic = as.factor(i_chronic))
+pred_data <- pred_data %>% mutate(i_high_bp = as.factor(i_high_bp))
+pred_data <- pred_data %>% mutate(i_obesity = as.factor(i_obesity))
+pred_data <- pred_data %>% mutate(i_statin = as.factor(i_statin))
+pred_data <- pred_data %>% mutate(i_aspirin = as.factor(i_aspirin))
+
+pred_data <- pred_data %>% mutate(gender = factor(gender,labels = c("male","female")))
+pred_data <- pred_data %>% mutate(race = factor(race,labels = c("white","black","unknown","unknown")))
+pred_data <- pred_data %>% mutate(ethnicity = factor(ethnicity,
+                labels = c("not hispanic or latino","not hispanic or latino","not hispanic or latino","hispanic or latino")))
+
+# Print head of data
+head(pred_data)
+```
+
+
+# Data Exploration
+
+Explore characteristics of the data and variables
+
+## Explore Heart Disease by Each Variable
+
+The charts below visually represent the categorical information contained in the dataset.
+
+ - Patients with diabetes,chronic heart conditions, high blood pressure, and obesity seem more likely to have heart disease
+ - Medications and other demographics seem less clear based on the visualizations - we'll have to analyze with models
+
+```{r}
+tb_diabetes = xtabs(~data$dep_target_hd+data$i_diabetes)
+tb_chronic = xtabs(~data$dep_target+data$i_chronic)
+tb_high_bp = xtabs(~data$dep_target+data$i_high_bp)
+tb_obesity = xtabs(~data$dep_target+data$i_obesity)
+tb_statin = xtabs(~data$dep_target+data$i_statin)
+tb_aspirin = xtabs(~data$dep_target+data$i_aspirin)
+tb_gender = xtabs(~data$dep_target+data$gender)
+tb_race = xtabs(~data$dep_target+data$race)
+tb_ethnicity = xtabs(~data$dep_target+data$ethnicity)
+
+
+barplot(prop.table(tb_diabetes),axes=T,space=0.3,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        horiz=T, col=c("blue","brown"),main="Heart Disease by Diabetes")
+barplot(prop.table(tb_chronic),axes=T,space=0.3, horiz=T,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        col=c("blue","brown"),main="Heart Disease by Chronic Heart Condition")
+barplot(prop.table(tb_high_bp),axes=T,space=0.3,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        horiz=T, col=c("blue","brown"),main="Heart Disease by High BP")
+barplot(prop.table(tb_obesity),axes=T,space=0.3,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        horiz=T, col=c("blue","brown"),main="Heart Disease by Obesity")
+barplot(prop.table(tb_statin),axes=T,space=0.3,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        horiz=T, col=c("blue","brown"),main="Heart Disease by Statin Medication")
+barplot(prop.table(tb_aspirin),axes=T,space=0.3,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        horiz=T, col=c("blue","brown"),main="Heart Disease by Aspirin Medication")
+barplot(prop.table(tb_gender),axes=T,space=0.3,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        horiz=T, col=c("blue","brown"),main="Heart Disease by Gender")
+barplot(prop.table(tb_race),axes=T,space=0.3, horiz=T,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        col=c("blue","brown"),main="Heart Disease by Race")
+barplot(prop.table(tb_ethnicity),axes=T,space=0.3, horiz=T,
+        xlab="Proportion without HD (blue) vs with HD (Brown)",
+        col=c("blue","brown"),main="Heart Disease by Ethnicity")
+```
+
+## Explore Correlation Between Variables
+
+Observing the correlation plot, there doesn't appear to be any strong correlations between variables. This lowers the concern that there could be multicollinearity in our models. (Multicollinearity in out final model could result in unstable coefficients and affect prediction.) 
+
+```{r}
+data_corr <- data %>% mutate(i_diabetes = as.numeric(i_diabetes), i_chronic = as.numeric(i_chronic), i_high_bp = as.numeric(i_high_bp), i_obesity = as.numeric(i_obesity), i_statin = as.numeric(i_statin), i_aspirin = as.numeric(i_aspirin))
+
+corr_vars <- c("dep_target_hd", "i_diabetes", "i_chronic", "i_high_bp", "i_obesity", "i_statin", "i_aspirin", "age")
+
+corr_matrix<-cor(data_corr[corr_vars], use="pairwise.complete.obs")
+corrplot(corr_matrix, method = "circle")
+
+```
+
+# Build Model
+
+## Split Testing/Training Data
+
+We'll train on 80% of the data, and test on 20% of the data
+
+```{r}
+set.seed(100)
+
+testRows = sample(nrow(data),0.2*nrow(data))
+testData = data[testRows, ]
+trainData = data[-testRows, ]
+n = nrow(trainData)
+
+```
+
+## Variable Selection
+
+We'll use LASSO regression and Forward/Backward stepwise regression to perform variable selection.
+We'll also compare this to a baseline model with variables chosen based on baseline conditions.
+
+
+**Baseline Model**
+
+Key condition variables selected.
+
+```{r}
+set.seed(100)
+
+basemodel = glm(dep_target_hd ~ i_diabetes + i_chronic + i_high_bp + i_obesity + i_statin + i_aspirin, data = trainData, family=binomial)
+
+summary(basemodel)
+```
+
+
+**LASSO Regression**
+
+All variables except ethnicity are selected by the LASSO method.
+
+The coefficient for age is very close to 0, indicating that perhaps we should consider a model that excludes this as a predictor as well.
+
+```{r}
+set.seed(100)
+
+# Optimize lambda using cross validation
+lassomodel.cv = cv.glmnet(data.matrix(trainData[,2:11]), trainData[,1], alpha=1, nfolds=10)
+
+lassomodel = glmnet(data.matrix(trainData[,2:11]), trainData[,1], alpha=1, nlambda=100)
+
+# minimum lambda
+lassomodel.cv$lambda.min
+
+# Extract coefficents at optimal lambda
+coef(lassomodel, s=lassomodel.cv$lambda.min)
+```
+
+**Forward/Backward Stepwise Regression**
+
+All variables except ethnicity are selected by the Forward-Backward Stepwise method. Age still has a coefficient close to 0.
+
+```{r}
+set.seed(100)
+
+# Create the minimum and maximum model
+minmod = glm(dep_target_hd~1, data = trainData, family=binomial)
+maxmod = glm(dep_target_hd~.-state, data = trainData, family=binomial)
+
+# Stepwise regression using AIC as the complexity penalty
+stepmodel = step(maxmod, scope = list(lower = minmod, upper = maxmod), direction = "both", trace=F)
+# Show the optimal model
+summary(stepmodel)
+```
+
+## Prediction
+
+For Logistic Regression, we first predict the probability of each person in the test data having heart disease.
+Then, we select a threshold to categorize the predicted probabilities as having heart disease, or not.
+
+We evaluate three thresholds
+
+ - 50%: taking the best guess out of the model as to whether the patient has heart disease, or not.
+ - 40%: setting a lower cutoff to potentially catch more people with potential heart disease.
+ - 60%: setting a higher cutoff to diagnose patients to limit false diagnoses. 
+  
+```{r}
+testData <- testData %>% mutate(lasso_pred = predict(lassomodel, data.matrix(testData[,2:11]), s=lassomodel.cv$lambda.min))
+testData <- testData %>% mutate(step_pred = predict(stepmodel,testData))
+testData <- testData %>% mutate(base_model_pred = exp(predict(basemodel,testData))/(1+exp(predict(basemodel,testData))))
+
+# use threshold of 0.5
+testData <- testData%>% mutate(pred_outcome_lasso_50 = ifelse(lasso_pred >= 0.50,1,0))
+testData <- testData%>% mutate(pred_outcome_step_50 = ifelse(step_pred >= 0.50,1,0))
+testData <- testData%>% mutate(pred_outcome_base_50 = ifelse(base_model_pred >= 0.50,1,0))
+
+# use threshold of 0.4
+testData <- testData%>% mutate(pred_outcome_lasso_40 = ifelse(lasso_pred >= 0.40,1,0))
+testData <- testData%>% mutate(pred_outcome_step_40 = ifelse(step_pred >= 0.40,1,0))
+testData <- testData%>% mutate(pred_outcome_base_40 = ifelse(base_model_pred >= 0.40,1,0))
+
+# use threshold of 0.6
+testData <- testData%>% mutate(pred_outcome_lasso_60 = ifelse(lasso_pred >= 0.60,1,0))
+testData <- testData%>% mutate(pred_outcome_step_60 = ifelse(step_pred >= 0.60,1,0))
+testData <- testData%>% mutate(pred_outcome_base_60 = ifelse(base_model_pred >= 0.60,1,0))
+```
+
+
+## Evaluate Models
+
+Next, we evaluate the models. We look at the Confusion Matrices for different models and thresholds. We also look at the cost of under/over diagnoses. The following informs our model selection.
+
+ - Accuracy: Proportion of response values predicted correctly
+ - Sensitivity (True Positive Rate): Proportion of responses with heart disease predicted correctly
+ - Specificity (True Negative Rate): Proportion of responses without heart disease predicted correctly
+ - Cost (Equal): Assume that the cost of underdiagnosing and overdiagnosing heart disease are the same
+ - Cost (Unequal): Assume that the cost of underdiagnosing heart disease is more significant than the cost of overdiagnosing
+
+ 
+Regarding cost: underdiagnosing heart disease has cost in terms of human loss, lower quality of life, and economic impacts that are difficult to quantify, but are more costly than overdiagnosing heart disease, which incurs temporary additional expense for the patient. It's hard to estimate the exact cost, but here we are suggesting underdiagnosing (false negative) is **2x** more costly.
+
+If all models have similar prediction metrics, we'll give preference to the model with the lower cost and higher sensitivity (correctly identifying positives is more important)
+
+
+### Confusion Matrix Summary
+
+Select the LASSO model at 40% threshold.
+
+ - Threshold: The 40% threshold makes sense given our view of risks and payoffs. Under the 2x Cost evaluation, these models have a lower cost.
+ - Model: LASSO (40%) is selected because it has the highest accuracy and highest sensitivity (true positive rate)
+
+
+|          | Accuracy    | Sensitivity   | Specificity  | Equal Cost  | 2x Cost  |
+|----------|-------------|---------------|--------------|-------------|----------|
+|base 50   |0.7373       |0.7327         |0.7466        |5,254        |8,846   |          
+|lasso 50  |0.7382       |0.7367         |0.7412        |5,236        |8,726   | 
+|step 50   |0.7314       |0.7197         |0.7588        |5,371        |9,288   | 
+|base 40   |0.7400       |0.8110         |0.6668        |5,201        |7,118   | 
+|lasso 40  |0.7406       |0.8183         |0.6640        |5,188        |6,993   | 
+|step 40   |0.7338       |0.7244         |0.7547        |5,323        |9,121   | 
+|base 60   |0.7332       |0.7242         |0.7530        |5,336        |9,133   | 
+|lasso 60  |0.7306       |0.7183         |0.7595        |5,388        |9,338   | 
+|step 60   |0.7262       |0.7088         |0.7714        |5,476        |9,683   | 
+
+
+
+**Confusion Matrix Code**
+
+Code below shows the calculations of confusion matrices
+
+```{r}
+# 50% threshold
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_base_50, data = testData))
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_lasso_50, data = testData))
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_step_50, data = testData))
+
+# 40% threshold
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_base_40, data = testData))
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_lasso_40, data = testData))
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_step_40, data = testData))
+
+# 60% threshold
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_base_60, data = testData))
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_lasso_60, data = testData))
+confusionMatrix(xtabs(~dep_target_hd + pred_outcome_step_60, data = testData))
+
+```
+
+**Cost Code**
+
+Code below shows the cost calculations
+
+```{r}
+xtabs(~dep_target_hd + pred_outcome_base_50, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_base_50, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_base_50, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_base_50, data = testData)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_base_40, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_base_40, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_base_40, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_base_40, data = testData)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_base_60, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_base_60, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_base_60, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_base_60, data = testData)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_lasso_50, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_lasso_50, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_lasso_50, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_lasso_50, data = testData)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_lasso_40, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_lasso_40, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_lasso_40, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_lasso_40, data = testData)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_lasso_60, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_lasso_60, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_lasso_60, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_lasso_60, data = testData)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_step_50, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_step_50, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_step_50, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_step_50, data = testData)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_step_40, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_step_40, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_step_40, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_step_40, data = testData)[2,1]
+
+xtabs(~dep_target_hd + pred_outcome_step_60, data = testData)[1,2] + xtabs(~dep_target_hd + pred_outcome_step_60, data = testData)[2,1]
+xtabs(~dep_target_hd + pred_outcome_step_60, data = testData)[1,2] + 2*xtabs(~dep_target_hd + pred_outcome_step_60, data = testData)[2,1]
+
+
+```
+
+
+# Conclusion
+
+Based on this analysis, we can conclude that there is a relationship present in the data between independent and dependent variables. We explored the data, performed variable selection, trained and tested the data, and finally evaluated and selected a model. We selected the LASSO model at 40% threshold, as discussed above. To summarize the rationale for this model selection:
+
+ - Threshold: The 40% threshold makes sense given our view of risks and payoffs. Under the 2x Cost evaluation, these models have a lower cost.
+ - Model: LASSO (40%) is selected because it has the highest accuracy and highest sensitivity (true positive rate)
+
+## Final Model
+
+We will re-train an OLS model using LASSO-selected predictors. Finally, we will use this model to predict outcomes for the remaining 2.2M patients.
+
+```{r}
+set.seed(100)
+
+lasso_retrained = glm(dep_target_hd ~ i_diabetes + i_chronic + i_high_bp + i_obesity + i_statin + i_aspirin + age + gender + race, data = trainData, family=binomial)
+
+summary(lasso_retrained)
+
+pred_data <- pred_data %>% mutate(lasso_pred = exp(predict(lasso_retrained,pred_data))/(1+exp(predict(lasso_retrained,pred_data))))
+pred_data <- pred_data %>% mutate(pred_outcome_lasso_40 = ifelse(lasso_pred >= 0.40,1,0))
+pred_data <- pred_data %>% mutate(pred_outcome_lasso_50 = ifelse(lasso_pred >= 0.50,1,0))
+pred_data <- pred_data %>% mutate(pred_outcome_lasso_60 = ifelse(lasso_pred >= 0.60,1,0))
+
+#confusionMatrix(xtabs(~dep_target_hd + pred_outcome_lasso_40, data = data))
+
+```
+
+**Final Model Equation**
+
+Probability of Having CVD = $$\frac{e^{\hat\beta_0 + \hat\beta_1 X_1 + \hat\beta_2X_2 + \hat\beta_3X_3 + \hat\beta_4X_4 + \hat\beta_5X_5 + \hat\beta_6X_6 + \hat\beta_7X_7 + \hat\beta_8X_8 + \hat\beta_9X_9}}{1+e^{\hat\beta_0 + \hat\beta_1 X_1 + \hat\beta_2X_2 + \hat\beta_3X_3 + \hat\beta_4X_4 + \hat\beta_5X_5 + \hat\beta_6X_6 + \hat\beta_7X_7 + \hat\beta_8X_8 + \hat\beta_9X_9}}$$
+
+Where:
+
+ - $\beta_0$ estimated by $\hat\beta_0$: (Intercept)
+ - $\beta_1$ estimated by $\hat\beta_1$: Diabetes
+ - $\beta_2$ estimated by $\hat\beta_2$: Chronic HD
+ - $\beta_3$ estimated by $\hat\beta_3$: High BP
+ - $\beta_4$ estimated by $\hat\beta_4$: Obesity
+ - $\beta_5$ estimated by $\hat\beta_5$: Statin
+ - $\beta_6$ estimated by $\hat\beta_6$: Aspirin
+ - $\beta_7$ estimated by $\hat\beta_7$: Age
+ - $\beta_8$ estimated by $\hat\beta_8$: Gender
+ - $\beta_9$ estimated by $\hat\beta_9$: Race
+
+Probability of Having CVD  = $$\frac{e^{-2.09 + 1.42X_1 + 1.17X_2 + 1.09X_3 + 0.73X_4 + 0.02X_5 + 0.11X_6 + 0.01X_7 - 0.01X_8 -0.10X_9b -0.19X_9u }}{1+e^{-2.09 + 1.42X_1 + 1.17X_2 + 1.09X_3 + 0.73X_4 + 0.02X_5 + 0.11X_6 + 0.01X_7 - 0.01X_8 -0.10X_9b -0.19X_9u }}$$
+
+
+## Test for Overall Regression, Goodness of Fit, and Final Metrics
+
+
+**Overall Regression**
+
+we can test the overall significance of the model. As shown below, the p-value is very close to zero, meaning we can reject the null hypothesis and conclude that the model is significant overall.
+```{r}
+1-pchisq((lasso_retrained$null.dev - lasso_retrained$deviance), (lasso_retrained$df.null - lasso_retrained$df.resid))
+```
+
+**Goodness of Fit**
+
+We have shown that the model has predictive power, but we also want to evaluate whether the model is a good fit. For a GOF test, we are looking for high p values (we do not want to reject the null hypothesis that the model is a good fit).
+
+Based on the GOF test, we reject the null hypothesis that the model is a good fit. It is possible to have a model with predictive power that is not a good fit. The plot and histogram of the deviance residuals demonstrate skewness/abnormal patterns. Ideally, we would want to find a datasource that provides a better fitting model.
+
+```{r}
+1-pchisq(lasso_retrained$deviance, lasso_retrained$df.residual)
+
+res = resid(lasso_retrained,type="deviance")
+qqPlot(res, ylab="Deviance residuals")
+hist(res,10,xlab="Deviance residuals", main="")
+```
+
+
+**ROC (Reciever Operating Characteristics) curve**
+
+Area under curve of ROC curve: higher AUC means the better the model will be at distinguishing patients with and without heart disease. 
+
+AUC of 0.5 would indicate the model is no better at distinguishing than essentially guessing. The AUC of our model is 0.74.
+
+```{r}
+pred <- prediction(pred_data$pred_outcome_lasso_40,pred_data$dep_target_hd) # create a prediction object in R
+class(pred)
+
+perf <- performance(pred, "tpr", "fpr") # tpr and fpr are true and false positive rates
+plot(perf, colorize=T)
+
+```
+
+```{r}
+auc.perf <-  performance(pred, measure = "auc")
+auc.perf@y.values
+```
+
+# Final Data Fields & Export
+
+```{r}
+regions <- regions %>% rename(StateName = State)
+
+data_export_hda <- pred_data
+
+data_export_hda <- data_export_hda %>% mutate(undiagnosed_40 = ifelse(pred_outcome_lasso_40==1 & dep_target_hd==0, 1, 0)) %>%
+               mutate(undiagnosed_50 = ifelse(pred_outcome_lasso_50==1 & dep_target_hd==0, 1, 0)) %>%
+               mutate(undiagnosed_60 = ifelse(pred_outcome_lasso_60==1 & dep_target_hd==0, 1, 0)) %>%
+               mutate(HispUndiagnosed40 = ifelse(ethnicity=="hispanic or latino" & pred_outcome_lasso_40 == 1 & dep_target_hd == 0, 1, 0)) %>% 
+               mutate(HispUndiagnosed50 = ifelse(ethnicity=="hispanic or latino" & pred_outcome_lasso_50 == 1 & dep_target_hd == 0, 1, 0)) %>% 
+               mutate(HispUndiagnosed60 = ifelse(ethnicity=="hispanic or latino" & pred_outcome_lasso_60 == 1 & dep_target_hd == 0, 1, 0)) %>%
+               mutate(AgeGroups = ifelse(age >= 65 & age <= 74, "Ages 65-74", ifelse(age >= 75 & age <= 84, "Ages 75-84", ifelse(age >= 85, "Ages 85+", "Under 65 or Missing"))))
+
+
+state_pcts_total <- data_export_hda %>% group_by(state) %>% 
+                    summarise(totalState = n_distinct(person_id), 
+                              StateUndiag40 = sum(undiagnosed_40),
+                              StateUndiag50 = sum(undiagnosed_50),
+                              StateUndiag60 = sum(undiagnosed_60),
+                              .groups = 'drop') %>%
+                    mutate(StatePopPerc40 = StateUndiag40*100/totalState)  %>%
+                    mutate(StatePopPerc50 = StateUndiag50*100/totalState)  %>%
+                    mutate(StatePopPerc60 = StateUndiag60*100/totalState) 
+
+state_pcts_total <- left_join(state_pcts_total, regions, by = c("state"="StateCode"))
+
+state_pcts_hisp <- data_export_hda %>% filter(ethnicity=="hispanic or latino") %>% 
+                    group_by(state) %>%  
+                    summarise(totalHispState = n_distinct(person_id), 
+                              StateHispUndiag40 = sum(HispUndiagnosed40),
+                              StateHispUndiag50 = sum(HispUndiagnosed50),
+                              StateHispUndiag60 = sum(HispUndiagnosed60),
+                              .groups = 'drop') %>%
+                    mutate(StateHispPopPerc40 = StateHispUndiag40*100/totalHispState)  %>%
+                    mutate(StateHispPopPerc50 = StateHispUndiag50*100/totalHispState)  %>%
+                    mutate(StateHispPopPerc60 = StateHispUndiag60*100/totalHispState)
+
+state_pcts_hisp <- left_join(state_pcts_hisp, regions, by = c("state"="StateCode"))
+```
+
+Export data to CSV
+```{r}
+#write.csv(data_export_hda, "C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/train100k_test2m/hda.csv")
+#write.csv(state_pcts_total, "C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/train100k_test2m/hdas.csv")
+#write.csv(state_pcts_hisp, "C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/train100k_test2m/hisp.csv")
+#save(data_export_hda, file = "C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/MergeResults/data_export_hda.RData")
+#save(state_pcts_total, file = "C:/Users/caitl/Documents/OMSA/CSE6242/Project/Logistic Regression Analysis/MergeResults/state_pcts_total.RData")
+```
