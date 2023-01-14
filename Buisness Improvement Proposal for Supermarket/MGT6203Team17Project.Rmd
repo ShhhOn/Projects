@@ -1,0 +1,282 @@
+---
+title: "MGT6203 Team 17 Project"
+output: html_document
+---
+```{r}
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(corrplot)) install.packages("corrplot")
+if (!require(ggplot2)) install.packages("ggplot2")
+if (!require(GGally)) install.packages("GGally")
+if (!require(ROCR)) install.packages("ROCR")
+if (!require(car)) install.packages("car")
+if (!require(matrixStats)) install.packages("matrixStats")
+if (!require(mlbench)) install.packages("mlbench")
+if (!require(caret)) install.packages("caret")
+if (!require(clustMixType)) install.packages("clustMixType")
+if (!require(pscl)) install.packages("pscl")
+library(pscl)
+library(clustMixType)
+library(mlbench)
+library(caret)
+library(matrixStats)
+library(car)
+library(ROCR)
+library(GGally)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(randomForest)
+```
+### STEP 1. Data Cleaning
+```{r}
+# load and summarize the data
+df <- read.csv("marketing_data.csv", header=TRUE)
+summary(df)
+str(df)
+```
+
+
+```{r}
+# check if ID is unique
+n_distinct(df$ID) == length(df$ID)
+```
+```{r}
+# find missing values
+df[df==""] <- NA
+colSums(is.na(df))
+df[is.na(df)] <- 0 # fill missing income with 0
+
+# normalize education
+summary(as.factor(df$Education))
+df[df$Education=='2n Cycle','Education'] = 'Masters'
+df[df$Education=='Master','Education'] = 'Masters'
+
+# normalize marital status: exclude the few ones that are hard to interpret
+summary(as.factor(df$Marital_Status))
+df = df[df$Marital_Status!="Absurd"&df$Marital_Status!="YOLO",]
+df[df$Marital_Status=='Alone','Marital_Status'] = 'Single'
+```
+
+```{r}
+# clean data and transform variables
+df <- df %>% 
+  mutate(Income = as.numeric(gsub("[\\$,]", "", Income))) %>% # make Income numeric
+  mutate(Education = factor(Education)) %>% # turn categorical variables into factors
+  mutate(Marital_Status = factor(Marital_Status)) %>%
+  mutate(Complain = factor(Complain)) %>%
+  mutate(Country = factor(Country)) %>%
+  mutate(Dt_Customer = as.Date(Dt_Customer, format = "%m/%d/%y")) # turn dates into date format
+
+# find the date range of the data
+mostRecent = max(df$Dt_Customer)
+mostDated = min(df$Dt_Customer)
+mostRecent- mostDated # 699 days
+
+# create new variables
+df <- df %>% 
+  mutate(Age = as.numeric(format(Dt_Customer,'%Y'))-Year_Birth) %>% # calculate age as of the year in Dt_Customer
+  mutate(Year_Birth = factor(Year_Birth)) %>%
+  mutate(NoChild = factor(ifelse(Kidhome==0 & Teenhome==0,1,0))) %>%
+  mutate(total_Purchases = NumWebPurchases+
+           NumCatalogPurchases+NumStorePurchases) %>% # leave out NumDealsPurchases to avoid double counting
+  mutate(TotalAcceptedCmp = AcceptedCmp1+AcceptedCmp2+
+           AcceptedCmp3+AcceptedCmp4+AcceptedCmp5+Response) %>% 
+  mutate(AnyAcceptedCmp = ifelse(AcceptedCmp1+AcceptedCmp2+
+           AcceptedCmp3+AcceptedCmp4+AcceptedCmp5+Response>0,1,0)) %>% 
+  mutate(AcceptedCmp1 = factor(AcceptedCmp1)) %>%
+  mutate(AcceptedCmp2 = factor(AcceptedCmp2)) %>% 
+  mutate(AcceptedCmp3 = factor(AcceptedCmp3)) %>% 
+  mutate(AcceptedCmp4 = factor(AcceptedCmp4)) %>% 
+  mutate(AcceptedCmp5 = factor(AcceptedCmp5)) %>% 
+  mutate(Response = factor(Response)) %>% 
+  mutate(AnyAcceptedCmp = factor(AnyAcceptedCmp))
+
+# make firstAcceptance variable
+f <- function(x){x==1} 
+li <- c()
+for (idx in seq(1,nrow(df))){
+  c <- as.vector(df[idx,c(24,25,21,22,23,26)])
+  li <- append(li,Position(f, c, right = FALSE, nomatch=0))
+}
+
+df <- df %>% mutate(firstAcceptance = li)
+
+```
+### STEP 2. correlation analysis
+```{r}
+numerical_vars <- df %>% select(where(is.numeric))
+res <- cor(numerical_vars[-1])
+round(res,2)
+```
+```{r}
+cor_df <- as.data.frame(as.table(res))
+cor_df %>%  arrange(desc(Freq)) %>% filter(Freq>0.6 & Freq<1)
+cor_df %>%  arrange(desc(Freq)) %>% filter(Freq<(-0.5))
+```
+```{r}
+# visualize
+corrplot(res, method="number", type="upper",number.cex= 0.5,tl.col = "black", tl.cex=0.75)
+```
+### STEP 3. Check outliers and scatterplots
+```{r}
+par(mar=c(3,10,1,5)) # 'bottom', 'left', 'top', 'right'
+boxplot(data.frame(scale(numerical_vars)), horizontal=TRUE,las=2)
+
+# some scatter plots (not super effective)
+ggplot(df, aes(x=Income, y=total_Purchases)) + geom_point() +
+  scale_colour_hue(l=50) + 
+  geom_smooth(method=lm) 
+ggplot(df, aes(x=MntFruits, y=total_Purchases)) + geom_point()
+ggplot(df, aes(x=log(MntFruits+1), y=log(total_Purchases+1))) + geom_point()+
+  scale_colour_hue(l=50) + 
+  geom_smooth(method=lm)
+ggplot(df, aes(x=log(MntWines+1), y=total_Purchases)) + geom_point() +
+  scale_colour_hue(l=50) + 
+  geom_smooth(method=lm) 
+```
+### STEP 4. Modeling
+#### A) K-Prototypes
+(Your result might be different from what's shown in our report due to randomness.)
+```{r}
+dta_std <- scale(numerical_vars[,-1])
+categorical_vars <- df %>% select(where(is.factor))
+cluster_dta <- data.frame(dta_std,categorical_vars[,-1])
+wss = list()
+# WARNING: TAKES A LONG TIME TO RUN
+for (i in 1:10) wss[i] <- kproto(cluster_dta, k=i, iter.max=30, nstart = 10, verbose=FALSE)$tot.withinss
+plot(1:10, wss, type = "b", xlab = "Number of Clusters", ylab = "Total Within-Cluster Sum of Squares")
+
+km.3 = kproto(cluster_dta, 3, nstart = 10, verbose=FALSE) # 3 cluster solution
+dta_km3 <- data.frame(cluster_dta, km.3$cluster)
+# clprofiles(km.3, cluster_dta)
+
+clustered_df <- data.frame(df, km.3$cluster)
+# row.names(clustered_df) <- NULL
+# write.csv(clustered_df, file="clustered_marketing data.csv", row.names=FALSE)
+```
+
+#### B) Regression Analysis
+```{r}
+model <- lm(total_Purchases~.-MntWines+log(MntWines+1)-MntFruits+log(MntFruits+1)-MntMeatProducts+log(MntMeatProducts+1)
+            -MntFishProducts+log(MntFishProducts+1)-MntSweetProducts+log(MntSweetProducts+1)-MntGoldProds
+            +log(MntGoldProds+1)-ID-Year_Birth-Dt_Customer-TotalAcceptedCmp-firstAcceptance-AnyAcceptedCmp
+            -NumWebPurchases-NumCatalogPurchases-NumStorePurchases-Country-NoChild, df[-526,])
+summary(model)
+```
+
+```{r}
+# Try step function
+step(model, scope=list(upper=~.,lower=~1), direction = "both")
+
+model_step <- lm(formula = total_Purchases ~ Education + Income + Kidhome + 
+                   Recency + NumDealsPurchases + AcceptedCmp3 + AcceptedCmp4 + AcceptedCmp5 +
+     AcceptedCmp1 + Response + Complain + log(MntWines + 1) + log(MntFruits + 1) 
+   + log(MntMeatProducts + 1) + log(MntFishProducts + 1) + log(MntSweetProducts + 1) + log(MntGoldProds + 1), 
+   data = df[-526,])
+summary(model_step)
+```
+
+```{r}
+model <- lm(NumWebPurchases~.-MntWines+log(MntWines+1)-MntFruits+log(MntFruits+1)-MntMeatProducts+log(MntMeatProducts+1)
+            -MntFishProducts+log(MntFishProducts+1)-MntSweetProducts+log(MntSweetProducts+1)-MntGoldProds
+            +log(MntGoldProds+1)-ID-Year_Birth-Dt_Customer-TotalAcceptedCmp-firstAcceptance-AnyAcceptedCmp
+            -total_Purchases-Country-NoChild, df[-526,])
+summary(model)
+
+model <- lm(NumCatalogPurchases~.-MntWines+log(MntWines+1)-MntFruits+log(MntFruits+1)-MntMeatProducts
+            +log(MntMeatProducts+1)-MntFishProducts+log(MntFishProducts+1)-MntSweetProducts+log(MntSweetProducts+1)
+            -MntGoldProds+log(MntGoldProds+1)-ID-Year_Birth-Dt_Customer-TotalAcceptedCmp-firstAcceptance
+            -AnyAcceptedCmp-total_Purchases-Country, df[-526,])
+summary(model)
+
+
+model <- lm(NumStorePurchases~.-MntWines+log(MntWines+1)-MntFruits+log(MntFruits+1)-MntMeatProducts
+            +log(MntMeatProducts+1)-MntFishProducts+log(MntFishProducts+1)-MntSweetProducts+log(MntSweetProducts+1)
+            -MntGoldProds+log(MntGoldProds+1)-ID-Year_Birth-Dt_Customer-TotalAcceptedCmp-firstAcceptance-AnyAcceptedCmp
+            -total_Purchases-Country, df[-526,])
+summary(model)
+```
+
+```{r}
+# Poisson regression
+summary(model_poi <- glm(total_Purchases~.-MntWines+log(MntWines+1)-MntFruits+log(MntFruits+1)-MntMeatProducts+log(MntMeatProducts+1) 
+            -MntFishProducts+log(MntFishProducts+1)-MntSweetProducts+log(MntSweetProducts+1)-MntGoldProds+log(MntGoldProds+1)
+            -ID-Year_Birth-Dt_Customer-TotalAcceptedCmp-firstAcceptance-AnyAcceptedCmp
+            -NumWebPurchases-NumCatalogPurchases-NumStorePurchases-Country-NoChild, family="poisson", df[-526,]))
+summary(model_poi <- glm(TotalAcceptedCmp~.-MntWines+log(MntWines+1)-MntFruits+log(MntFruits+1)-MntMeatProducts+log(MntMeatProducts+1) 
+            -MntFishProducts+log(MntFishProducts+1)-MntSweetProducts+log(MntSweetProducts+1)-MntGoldProds+log(MntGoldProds+1)
+            -ID-Year_Birth-Dt_Customer-firstAcceptance-AnyAcceptedCmp-total_Purchases-Country-NoChild
+            -AcceptedCmp1-AcceptedCmp2-AcceptedCmp3-AcceptedCmp4-AcceptedCmp5-Response, family="poisson", df[-526,]))
+
+```
+#### C) Logistic Regression
+```{r}
+summary(glm(AnyAcceptedCmp~.-ID-Year_Birth-Dt_Customer-AcceptedCmp1-AcceptedCmp2-AcceptedCmp3-AcceptedCmp4-AcceptedCmp5
+            -Response-total_Purchases-TotalAcceptedCmp-firstAcceptance-Country,
+    df,family='binomial'))
+summary(glm(AcceptedCmp1~.-ID-Year_Birth-Dt_Customer-AnyAcceptedCmp-AcceptedCmp2-AcceptedCmp3-AcceptedCmp4-AcceptedCmp5
+            -Response-total_Purchases-TotalAcceptedCmp-firstAcceptance-Country,
+            df,family='binomial'))
+summary(glm(AcceptedCmp2~.-ID-Year_Birth-Dt_Customer-AnyAcceptedCmp-AcceptedCmp3-AcceptedCmp4-AcceptedCmp5
+            -Response-total_Purchases-TotalAcceptedCmp-firstAcceptance-Country,
+            df,family='binomial'))
+summary(glm(AcceptedCmp3~.-ID-Year_Birth-Dt_Customer-AnyAcceptedCmp-AcceptedCmp4-AcceptedCmp5
+            -Response-total_Purchases-TotalAcceptedCmp-firstAcceptance-Country,
+            df,family='binomial'))
+summary(glm(AcceptedCmp4~.-ID-Year_Birth-Dt_Customer-AnyAcceptedCmp-AcceptedCmp5
+            -Response-total_Purchases-TotalAcceptedCmp-firstAcceptance-Country,
+            df,family='binomial'))
+summary(glm(AcceptedCmp5~.-ID-Year_Birth-Dt_Customer-AnyAcceptedCmp
+            -Response-total_Purchases-TotalAcceptedCmp-firstAcceptance-Country,
+            df,family='binomial'))
+summary(glm(Response~.-ID-Year_Birth-Dt_Customer-AnyAcceptedCmp-total_Purchases-TotalAcceptedCmp-firstAcceptance-Country,
+            df,family='binomial'))
+
+prob_conversion <- function(x){exp(x)/(1+exp(x))} # for coefficient interpretation
+```
+#### D) Other classification models
+```{r}
+total_cmp_response <- df %>% select('Education','Marital_Status','Income','Kidhome','Teenhome','Recency',
+                                    'MntWines','MntFruits','MntMeatProducts','MntFishProducts','MntSweetProducts',
+                                    'MntGoldProds','NumDealsPurchases','NumWebPurchases','NumCatalogPurchases',
+                                    'NumStorePurchases','NumWebVisitsMonth','Complain','Age','NoChild','AnyAcceptedCmp')
+control <- caret::trainControl(method="repeatedcv", number=10, repeats=3)
+# CART
+set.seed(12345)
+fit.cart <- caret::train(AnyAcceptedCmp~., data=total_cmp_response, method="rpart", trControl=control)
+# LDA
+set.seed(12345)
+fit.lda <- caret::train(AnyAcceptedCmp~., data=total_cmp_response, method="lda", trControl=control)
+# SVM
+set.seed(12345)
+fit.svm <- caret::train(AnyAcceptedCmp~., data=total_cmp_response, method="svmRadial", trControl=control)
+# kNN
+set.seed(12345)
+fit.knn <- caret::train(AnyAcceptedCmp~., data=total_cmp_response, method="knn", trControl=control)
+# Random Forest
+set.seed(12345)
+fit.rf <- caret::train(AnyAcceptedCmp~., data=total_cmp_response, method="rf", trControl=control)
+# collect resamples
+results <- resamples(list(CART=fit.cart, LDA=fit.lda, SVM=fit.svm, KNN=fit.knn, RF=fit.rf))
+results$values
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(results, scales=scales)
+```
+```{r}
+rf <- randomForest(AnyAcceptedCmp ~ ., data=total_cmp_response, ntree=100, keep.forest=TRUE, importance=TRUE)
+print(rf)
+pred1 = predict(rf,type = "prob")
+perf = prediction(pred1[,2], total_cmp_response$AnyAcceptedCmp)
+auc = performance(perf, "auc")
+auc@y.values
+pred3 = performance(perf, "tpr","fpr")
+plot(pred3,main="ROC Curve for Random Forest",col=2,lwd=2)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+importance(rf, type = 1)
+varImpPlot(rf)
+```
+
+
+
+
