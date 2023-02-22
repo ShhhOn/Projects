@@ -7,10 +7,10 @@ EIGENFACES FACE RECOGNITION
 5) take the mean (M) of all the 10 images. ~(1,4800).
 6) Subtract the mean from all the 10 images. ie. centering X1=S1-M
 7) Perform SVD or find the covariance. ( You may need to transpose for SVD)
-if using SVD:
+* if using SVD:
 	* Find the eigenvectors corresponding to the 6 largest eigenvalues
 	* These are the 6 eigenfaces. Reshape to get the images.
-if using covariance:
+* if using covariance:
 	* Find the eigenvectors corresponding to the 6 largest eigenvalues
 	* Find Z for the 6 eigenvectors( as described in lectures). These are the 6 eigenfaces
 	* Reshape to get the images
