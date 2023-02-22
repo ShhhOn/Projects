@@ -17,6 +17,13 @@ EIGENFACES FACE RECOGNITION
 8) Repeat the steps for Subject 2
 9) You will get 6 eigenfaces for Subject 1 and 6 eigenfaces for Subject 2
 
+EIGENFACES RESULTS
+------------------
+My residual distances are 10^6, which is on the lower end of what it should be for the SVD approach. The residual distance is finding the summation of the difference between the subject's test image and the test image scaled by the eigenface identity matrix, which outputs a singular scalar value. Presumably, residual distances that use the same subjects for the test image and the eigenfaces should have smaller values than if there were different subjects used for the eigenfaces and test images, which is close to what I got. From my results, S11>S21 and S22<S12, though I think it should have been S11 < S21
+
+Eigenface face recognition can work better if you have a larger pool of images with varying contrasting shades of that individual's face. This woud allow your mean to be a better representation of the subject and not have poor lighting or too much light/exposure impact the facial recognition. Based on this homework, it seemed like
+lighting had a big influence on the facial recognition. It is a little hard to tell based on just these two subjects how much skin tone, face shape, hair, and other features impact these results. I would be curious to see this homework also performed with more subjects to test those features.
+
 
 
 ISOMAP
