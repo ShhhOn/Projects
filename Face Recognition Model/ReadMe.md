@@ -21,6 +21,6 @@ if using covariance:
 
 ISOMAP
 ------
-1) Find the nearest neighbors of each datapoint within a specific distance (epsilon).So if a datapoint is within epsilon distance, it is considered a nearest neighbor,otherwise it is not
+1) Find the nearest neighbors of each datapoint within a specific distance (epsilon). So if a datapoint is within epsilon distance, it is considered a nearest neighbor,otherwise it is not
 2) Find the shortest path distance matrix D between each pair of points. It will find the shortest path along the data cloud, which is a little different than finding just the shortest Euclidean distance, depending on the shape of the data.
 3) Find low dimensional representation which preserves the distance information. This helps us unfold the data cloud and find the direct distances.
