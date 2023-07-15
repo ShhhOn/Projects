@@ -1,1 +1,1 @@
-# Data science projects from Georgia Tech can be found off of the branches
+# Data science projects from graduate school can be found off of the branches
